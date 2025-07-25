@@ -1,10 +1,11 @@
+import numpy as np
 import spaces
 from kokoro import KModel, KPipeline
 import gradio as gr
 import os
 import random
 import torch
-
+torch.__version__
 CUDA_AVAILABLE = torch.cuda.is_available()
 models = {gpu: KModel().to('cuda' if gpu else 'cpu').eval() for gpu in [False] + ([True] if CUDA_AVAILABLE else [])}
 pipelines = {lang_code: KPipeline(lang_code=lang_code, model=False) for lang_code in 'ab'}
@@ -16,6 +17,8 @@ def forward_gpu(ps, ref_s, speed):
     return models[True](ps, ref_s, speed)
 
 def generate_first(text, voice='af_heart', speed=1, use_gpu=CUDA_AVAILABLE):
+    print("------------","\n" in text)
+    text = text.replace("  ", " ")
     pipeline = pipelines[voice[0]]
     pack = pipeline.load_voice(voice)
     use_gpu = use_gpu and CUDA_AVAILABLE
@@ -36,6 +39,39 @@ def generate_first(text, voice='af_heart', speed=1, use_gpu=CUDA_AVAILABLE):
         return (24000, audio.numpy()), ps
     return None, ''
 
+
+def generate_complete(text, voice='af_heart', speed=1, use_gpu=CUDA_AVAILABLE):
+    pipeline = pipelines[voice[0]]
+    pack = pipeline.load_voice(voice)
+    use_gpu = use_gpu and CUDA_AVAILABLE
+    audio_chunks = []
+    split_points = []  # To keep track of where the text was split
+    
+    for i, (chunk_text, ps, _) in enumerate(pipeline(text, voice, speed)):
+        ref_s = pack[len(ps)-1]
+        try:
+            if use_gpu:
+                audio = forward_gpu(ps, ref_s, speed)
+            else:
+                audio = models[False](ps, ref_s, speed)
+        except gr.exceptions.Error as e:
+            if use_gpu:
+                gr.Warning(str(e))
+                gr.Info('Switching to CPU')
+                audio = models[False](ps, ref_s, speed)
+            else:
+                raise gr.Error(e)
+        audio_chunks.append(audio.numpy())
+        split_points.append(f"Chunk {i+1}: {chunk_text}")  # Record the split point
+    
+    if not audio_chunks:
+        return None, ""
+    # Combine all audio chunks
+    complete_audio = np.concatenate(audio_chunks)
+    # Join the split points with newlines for display
+    split_info = "\n".join(split_points)
+    return (24000, complete_audio), split_info
+    
 # Arena API
 def predict(text, voice='af_heart', speed=1):
     return generate_first(text, voice, speed, use_gpu=False)[0]
@@ -127,9 +163,14 @@ TOKEN_NOTE = '''
 ⬆️ Raise stress 1 level `[or](+2)` 2 levels (only works on less stressed, usually short words)
 '''
 
-with gr.Blocks() as generate_tab:
+with gr.Blocks(title="Kokoro - generate tab") as generate_tab:
     out_audio = gr.Audio(label='Output Audio', interactive=False, streaming=False, autoplay=True)
-    generate_btn = gr.Button('Generate', variant='primary')
+    # generate_btn = gr.Button('Generate', variant='primary')
+    
+    with gr.Row():
+        generate_btn = gr.Button('Generate First', variant='primary')
+        generate_complete_btn = gr.Button('Generate Complete', variant='primary')
+        
     with gr.Accordion('Output Tokens', open=True):
         out_ps = gr.Textbox(interactive=False, show_label=False, info='Tokens used to generate the audio, up to 510 context length.')
         tokenize_btn = gr.Button('Tokenize', variant='secondary')
@@ -139,7 +180,7 @@ with gr.Blocks() as generate_tab:
 STREAM_NOTE = ['⚠️ There is an unknown Gradio bug that might yield no audio the first time you click `Stream`.']
 STREAM_NOTE = '\n\n'.join(STREAM_NOTE)
 
-with gr.Blocks() as stream_tab:
+with  gr.Blocks(title="Kokoro - stream tab") as stream_tab:
     out_stream = gr.Audio(label='Output Audio Stream', interactive=False, streaming=True, autoplay=True)
     with gr.Row():
         stream_btn = gr.Button('Stream', variant='primary')
@@ -149,7 +190,7 @@ with gr.Blocks() as stream_tab:
         gr.DuplicateButton()
 
 API_OPEN = True
-with gr.Blocks() as app:
+with  gr.Blocks(title="Kokoro") as app:
     with gr.Row():
         with gr.Column():
             text = gr.Textbox(label='Input Text', info=f"Arbitrarily many characters supported")
@@ -177,6 +218,10 @@ with gr.Blocks() as app:
     stream_event = stream_btn.click(fn=generate_all, inputs=[text, voice, speed, use_gpu], outputs=[out_stream])
     stop_btn.click(fn=None, cancels=stream_event)
     predict_btn.click(fn=predict, inputs=[text, voice, speed], outputs=[out_audio])
-
+    generate_complete_btn.click(
+        fn=generate_complete, 
+        inputs=[text, voice, speed, use_gpu], 
+        outputs=[out_audio, out_ps]  # Now showing split points in the token display box
+    )    
 if __name__ == '__main__':
     app.queue(api_open=API_OPEN).launch(server_name="0.0.0.0", server_port=40001, show_api=API_OPEN)

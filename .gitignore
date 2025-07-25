@@ -169,3 +169,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+examples/0.wav
+examples/1.wav
+0.wav
+.vscode/launch.json
